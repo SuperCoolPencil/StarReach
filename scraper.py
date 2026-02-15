@@ -65,11 +65,16 @@ class ProfileScraper:
         page = await context.new_page()
         
         try:
-            # Short timeout to avoid hanging
-            await page.goto(url, timeout=10000, wait_until="domcontentloaded")
-            content = await page.content()
-            data = self.extract_from_text(content)
+            # Enforce a strict total timeout for the page operations
+            async with asyncio.timeout(30):
+                # timeout in ms for playwright
+                await page.goto(url, timeout=30000, wait_until="domcontentloaded")
+                content = await page.content()
+                data = self.extract_from_text(content)
 
+        except asyncio.TimeoutError:
+            # print(f"Timeout scraping {url}") 
+            pass
         except Exception as e:
             # Logging handled by caller usually, or we can just pass
             pass
