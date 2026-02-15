@@ -25,7 +25,7 @@ class GitHubClient:
         self.session.mount("https://", adapter)
         self.session.mount("http://", adapter)
 
-    def get_stargazers(self, repo_url: str) -> Generator[Dict, None, None]:
+    def get_stargazers(self, repo_url: str, fetch_details: bool = True) -> Generator[Dict, None, None]:
         """
         Fetches stargazers for a given repository URL.
         Yields each stargazer's profile data.
@@ -45,10 +45,13 @@ class GitHubClient:
                     break
                     
                 for user in users:
-                    # Get detailed user info to find public email/blog
-                    user_details = self.get_user_details(user["url"])
-                    if user_details:
-                        yield user_details
+                    if fetch_details:
+                        # Get detailed user info to find public email/blog
+                        user_details = self.get_user_details(user["url"])
+                        if user_details:
+                            yield user_details
+                    else:
+                        yield user
                 
                 # Pagination
                 if "next" in response.links:

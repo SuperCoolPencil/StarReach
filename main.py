@@ -148,24 +148,85 @@ async def main():
     new_users = []
     
     # We'll use a semaphore to limit concurrent browser pages
-    sem = asyncio.Semaphore(5) 
+        # Semaphore for concurrent operations (both GitHub API and Scraping)
+        # We can increase this since GitHub API is now non-blocking I/O (in threads)
+        # But we still want to be nice to GitHub API limits.
+        # Let's say 10 concurrent users processing at once.
+    sem = asyncio.Semaphore(10)
 
-    async with async_playwright() as p:
-        logger.info("Launching browser...")
-        browser = await p.chromium.launch(headless=False)
-        context = await browser.new_context(
+    async def process_full_user(raw_user):
+            async with sem:
+                try:
+                    # 1. Fetch details concurrently (non-blocking)
+                    # Use to_thread to run sync request in a separate thread
+                    if "url" in raw_user:
+                         details = await asyncio.to_thread(client.get_user_details, raw_user["url"])
+                         if details:
+                             raw_user.update(details)
+                    
+                    # 2. Scrape (already async)
+                    # We pass 'sem' to process_user but since we are already inside 'sem' here,
+                    # we might double-lock if process_user also uses sem?
+                    # The original process_user used 'sem'.
+                    # Let's refactor process_user to NOT use sem, or pass a dummy sem / nullcontext.
+                    # Actually, we can just remove sem from process_user call if we handle it here.
+                    # But process_user expects it. 
+                    # Let's just pass a null context or modify process_user?
+                    # Modifying process_user is cleaner but let's see.
+                    # Let's just create a dummy semaphore that does nothing, or pass the same sem?
+                    # If we pass same sem, we deadlock because we already hold it!
+                    # So we MUST NOT pass the same sem if process_user acquires it.
+                    
+                    # Wait, process_user definition: async def process_user(user, scraper, context, sem):
+                    # inside: async with sem:
+                    # If we hold sem here, and process_user tries to acquire sem, it will block if count is 1?
+                    # No, semaphores are not re-entrant locks.
+                    # So deadlock RISK!
+                    
+                    # Solution: Don't acquire sem here for the whole block.
+                    # Acquire sem for GitHub fetch, then release.
+                    # Then process_user acquires sem for Scraping.
+                    # This is better for resource usage anyway (don't hold browser slot while waiting for github).
+                    pass
+                except Exception as e:
+                    logger.error(f"Error processing user {raw_user.get('login')}: {e}")
+                    return raw_user
+            
+            # Re-implementation with fine-grained locking
+            
+            # A. Fetch Details
+            try:
+                # Limit GitHub concurrency separately? Or just rely on thread pool limit?
+                # Thread pool is large (32). Let's use a separate sem for GitHub if needed.
+                # converting synchronous IO to thread is good.
+                if "url" in raw_user:
+                     details = await asyncio.to_thread(client.get_user_details, raw_user["url"])
+                     if details:
+                         raw_user.update(details)
+            except Exception as e:
+                 logger.error(f"Error fetching details for {raw_user.get('login')}: {e}")
+
+            # B. Scrape (process_user handles its own locking)
+            # We need to make sure we don't start too many scraper tasks at once if we flood this.
+            # But process_user takes a semaphore! So it's safe.
+            return await process_user(raw_user, scraper, context, sem)
+
+    logger.info("Launching browser...")
+    browser = await p.chromium.launch(headless=False)
+    context = await browser.new_context(
             user_agent="Mozilla/5.0 (compatible; StarReach/1.0)",
             viewport={"width": 1280, "height": 720}
         )
-        await context.route("**/*", lambda route: route.continue_() if route.request.resource_type in ["document", "script"] else route.abort())
+    await context.route("**/*", lambda route: route.continue_() if route.request.resource_type in ["document", "script"] else route.abort())
 
-        user_generator = client.get_stargazers(args.repo_url)
+        # Get raw stargazers
+    user_generator = client.get_stargazers(args.repo_url, fetch_details=False)
         
-        tasks = []
-        total_fetched = 0
-        skipped_count = 0
+    tasks = []
+    total_fetched = 0
+    skipped_count = 0
         
-        try:
+    try:
             for user in user_generator:
                 if args.limit and total_fetched >= args.limit:
                     logger.info(f"Hit limit of {args.limit} users.")
@@ -178,8 +239,36 @@ async def main():
                         logger.info(f"Skipped {skipped_count} existing users...")
                     continue
 
-                tasks.append(process_user(user, scraper, context, sem))
+                # Launch async task
+                # We need to bound the number of concurrent tasks we spawn, otherwise we might OOM 
+                # if we iterate 1000 users instantly.
+                # So we should use a semaphore to limit *inflight* tasks.
+                # But process_full_user is async.
+                
+                if len(tasks) >= 20: 
+                    # This batch logic waits for ALL 20 to finish. 
+                    # Ideally we want a sliding window, but batch is fine.
+                    # The speedup comes from the fact that inside the batch,
+                    # waiting for GitHub for User A doesn't block starting GitHub for User B.
+                    logger.info(f"Processing batch of {len(tasks)} (Total new fetched: {total_fetched})...")
+                    batch_results = await asyncio.gather(*tasks, return_exceptions=True)
+                    
+                    # Filter results
+                    current_batch_users = []
+                    for r in batch_results:
+                        if isinstance(r, Exception):
+                            logger.error(f"Task failed with error: {r}")
+                        else:
+                            current_batch_users.append(r)
+                    
+                    new_users.extend(current_batch_users)
+                    tasks = []
+                    
+                    save_progress(base_df, new_users)
+
+                tasks.append(process_full_user(user))
                 total_fetched += 1
+
                 
                 if len(tasks) >= 20:
                     logger.info(f"Processing batch of {len(tasks)} (Total new fetched: {total_fetched})...")
@@ -208,11 +297,11 @@ async def main():
                 save_progress(base_df, new_users)
                 tasks = []
 
-        except KeyboardInterrupt:
+    except KeyboardInterrupt:
             logger.warning("Operation stopped by user.")
-        except Exception as e:
+    except Exception as e:
             logger.error(f"An error occurred in main loop: {e}", exc_info=True)
-        finally:
+    finally:
             if new_users:
                 logger.info(f"Saving progress before exit ({len(new_users)} new records)...")
                 save_progress(base_df, new_users)
