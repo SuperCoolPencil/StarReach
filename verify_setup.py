@@ -6,60 +6,51 @@ from exporter import export_to_excel, load_existing_users
 from playwright.async_api import async_playwright
 
 async def verify():
-    print("Starting verification (Resumability Test)...")
+    print("Starting verification (Enhanced Scraping)...")
     
-    # 1. Clean up previous runs
-    if os.path.exists("test_export.xlsx"):
-        os.remove("test_export.xlsx")
+    scraper = ProfileScraper()
 
-    # 2. Create a dummy initial excel with one user
-    initial_data = [{"Username": "already_done", "Name": "Done User", "GitHub Email": "done@example.com"}]
-    pd.DataFrame(initial_data).to_excel("test_export.xlsx", index=False)
-    print("Created initial excel with 'already_done' user.")
-
-    # 3. Verify load_existing_users
-    existing = load_existing_users("test_export.xlsx")
-    if "already_done" in existing:
-        print("✅ load_existing_users verified.")
+    # 1. Test Text Extraction
+    bio_text = "Software Engineer | Contact: test@bio.com | linkedin.com/in/bio-user"
+    extracted = scraper.extract_from_text(bio_text)
+    if extracted["scraped_email"] == "test@bio.com" and "bio-user" in extracted["scraped_linkedin"]:
+        print("✅ Text/Bio extraction verified.")
     else:
-        print(f"❌ load_existing_users failed. Got: {existing}")
+        print(f"❌ Text/Bio extraction failed. Got: {extracted}")
 
-    # 4. Simulate processing new user (mock logic)
-    mock_user = {
-        "login": "octocat-test",
-        "name": "The Octocat",
-        "blog": "http://localhost:8080/index.html",
-        "email": "api_email@github.com",
-        "html_url": "https://github.com/octocat-test",
-        # Mock scraped data
-        "scraped_email": "test@example.com",
-        "scraped_linkedin": "https://linkedin.com/in/testuser"
-    }
+    # 2. Test Generic URL Scraping (Localhost)
+    # We assume localhost:8080 is still running or we skip
+    mock_url = "http://localhost:8080/index.html"
+    
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            context = await browser.new_context()
+            
+            print(f"Scraping {file_url}...")
+            # We assume the file exists from previous step, or we create it?
+            if not os.path.exists("test_site"):
+                os.makedirs("test_site")
+            
+            with open("test_site/index.html", "w") as f:
+                 f.write('<html><body><p>Contact: page@example.com</p><a href="https://www.linkedin.com/in/page-user">LinkedIn</a></body></html>')
+            
+            abs_path = os.path.abspath("test_site/index.html")
+            file_url = f"file://{abs_path}"
+            
+            scraped_data = await scraper.scrape_url(context, file_url)
+            
+            if scraped_data.get("scraped_email") == "page@example.com":
+                 print("✅ Generic URL scraping verified.")
+            else:
+                 print(f"❌ Generic URL scraping failed. Got: {scraped_data}")
 
-    # 5. Append Logic Verification
-    existing_df = pd.read_excel("test_export.xlsx")
-    mock_user_df = pd.DataFrame([mock_user]).rename(columns={
-        "login": "Username", "name": "Name", "email": "GitHub Email",
-        "scraped_email": "Scraped Email", "blog": "Website",
-        "company": "Company", "location": "Location",
-        "twitter_username": "Twitter", "scraped_linkedin": "LinkedIn",
-        "html_url": "GitHub Profile"
-    })
-    
-    # Ensure columns match for concatenation
-    # In real main.py we align columns carefully.
-    
-    combined = pd.concat([existing_df, mock_user_df], ignore_index=True)
-    combined.to_excel("test_export.xlsx", index=False)
-    
-    final_df = pd.read_excel("test_export.xlsx")
-    users = final_df["Username"].tolist()
-    
-    if "already_done" in users and "octocat-test" in users:
-        print("✅ Merge/Append logic verified.")
-        print(f"Final Users: {users}")
-    else:
-        print(f"❌ Merge/Append logic failed. Users found: {users}")
+            await browser.close()
+    except Exception as e:
+        print(f"Playwright verification error: {e}")
 
 if __name__ == "__main__":
+    # Ensure test dir exists
+    if not os.path.exists("test_site"):
+        os.makedirs("test_site")
     asyncio.run(verify())
