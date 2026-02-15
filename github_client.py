@@ -1,4 +1,5 @@
 import os
+import time
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -34,33 +35,56 @@ class GitHubClient:
         url = f"{self.base_url}/repos/{owner}/{repo}/stargazers"
         
         while url:
-            try:
-                response = self.session.get(url, headers=self.headers, params={"per_page": 100}, timeout=10)
-                if response.status_code != 200:
-                    print(f"Error fetching stargazers: {response.status_code} - {response.text}")
-                    break
-                
-                users = response.json()
-                if not users:
-                    break
+            # Robust retry loop for the request itself
+            while True:
+                try:
+                    response = self.session.get(url, headers=self.headers, params={"per_page": 100}, timeout=10)
                     
-                for user in users:
-                    if fetch_details:
-                        # Get detailed user info to find public email/blog
-                        user_details = self.get_user_details(user["url"])
-                        if user_details:
-                            yield user_details
-                    else:
-                        yield user
-                
-                # Pagination
-                if "next" in response.links:
-                    url = response.links["next"]["url"]
-                else:
-                    url = None
-            except requests.exceptions.RequestException as e:
-                print(f"Request failed: {e}")
+                    if response.status_code == 200:
+                        break # Success, process data
+                    
+                    if response.status_code in [403, 429]:
+                        # Check specific rate limit headers first
+                        retry_after = int(response.headers.get("Retry-After", 60))
+                        reset_time = int(response.headers.get("X-RateLimit-Reset", 0))
+                        
+                        sleep_time = retry_after
+                        if reset_time:
+                            sleep_time = max(sleep_time, reset_time - time.time() + 1)
+                        
+                        # Cap sleep at 60s for sanity logging, then loop? 
+                        # Or just commit to waiting. User wants NO data loss.
+                        # We'll log and wait.
+                        print(f"Rate limit hit. Sleeping for {sleep_time:.2f} seconds...")
+                        time.sleep(sleep_time)
+                        continue
+                    
+                    print(f"Error fetching stargazers: {response.status_code} - {response.text}")
+                    return # Stop generator on fatal error
+                    
+                except requests.exceptions.RequestException as e:
+                    print(f"Request failed: {e}. Retrying in 5s...")
+                    time.sleep(5)
+                    continue
+
+            users = response.json()
+            if not users:
                 break
+                
+            for user in users:
+                if fetch_details:
+                    # Get detailed user info to find public email/blog
+                    user_details = self.get_user_details(user["url"])
+                    if user_details:
+                        yield user_details
+                else:
+                    yield user
+            
+            # Pagination
+            if "next" in response.links:
+                url = response.links["next"]["url"]
+            else:
+                url = None
 
     def get_user_details(self, user_url: str) -> Dict:
         """

@@ -11,7 +11,7 @@ from exporter import export_to_excel
 
 # Configure logging
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO, # Changed to INFO to reduce noise, explicit DEBUG for specific modules if needed
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler("starreach.log"),
@@ -20,70 +20,132 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Reduce noise from third-party libs
+# Reduce noise
 logging.getLogger("urllib3").setLevel(logging.WARNING)
 logging.getLogger("asyncio").setLevel(logging.WARNING)
-logging.getLogger("playwright").setLevel(logging.INFO)
+logging.getLogger("playwright").setLevel(logging.WARNING)
 
-async def process_user(user, scraper, context, sem):
-    """
-    Process a single user: 
-    1. Check bio for contacts.
-    2. Scrape blog/website if present.
-    3. Scrape GitHub profile (readme/sidebar) if present.
-    """
-    # 1. Check Bio
-    bio = user.get("bio")
-    if bio:
-        bio_contacts = scraper.extract_from_text(bio)
-        # Update only if not already found (or overwrite? let's overwrite as bio might be fresher or just merge)
-        # Actually simplest is just update, but we want to prioritize "best" source? 
-        # Let's just update for now.
-        if bio_contacts["scraped_email"] or bio_contacts["scraped_linkedin"]:
-             logger.debug(f"Found contact in bio for {user.get('login')}: {bio_contacts}")
-             user.update(bio_contacts)
-
-    # 2. Collect URLs to scrape
-    urls_to_scrape = []
-    
-    blog = user.get("blog")
-    if blog:
-        urls_to_scrape.append(blog)
-        
-    html_url = user.get("html_url")
-    if html_url:
-        urls_to_scrape.append(html_url)
-
-    # 3. Scrape concurrently
-    # Note: process_user uses the semaphore to limit scraping concurrency
-    if urls_to_scrape:
-        async with sem:
-            logger.debug(f"Scraping URLs for {user.get('login')}: {urls_to_scrape}")
+async def worker(worker_id, user_queue, result_queue, client, scraper, context):
+    logger.debug(f"Worker {worker_id} started.")
+    while True:
+        try:
+            # Get a "work item"
+            raw_user = await user_queue.get()
             
-            async def scrape_wrapper(u):
+            # Sentinel to stop
+            if raw_user is None:
+                user_queue.task_done()
+                break
+
+            login = raw_user.get("login", "unknown")
+            # logger.debug(f"Worker {worker_id} processing {login}")
+
+            # 1. Fetch Details (Bio, Blog, etc.) if not fully present
+            # We assume raw_user comes from the list endpoint which lacks full bio/blog often.
+            if "url" in raw_user and "bio" not in raw_user: # Basic check
                 try:
-                    return await scraper.scrape_url(context, u)
+                    details = await asyncio.to_thread(client.get_user_details, raw_user["url"])
+                    if details:
+                        raw_user.update(details)
                 except Exception as e:
-                    logger.error(f"Error scraping {u} for {user.get('login')}: {e}")
-                    return {}
+                    logger.warning(f"Worker {worker_id}: Error fetching details for {login}: {e}")
 
-            results = await asyncio.gather(*[scrape_wrapper(u) for u in urls_to_scrape])
+            # 2. Scrape
+            # Scraper logic embedded here to use the shared context
+            try:
+                # Check Bio
+                bio = raw_user.get("bio")
+                if bio:
+                    bio_contacts = scraper.extract_from_text(bio)
+                    if bio_contacts["scraped_email"] or bio_contacts["scraped_linkedin"]:
+                        raw_user.update(bio_contacts)
+
+                # Collect URLs
+                urls_to_scrape = []
+                if raw_user.get("blog"): urls_to_scrape.append(raw_user.get("blog"))
+                if raw_user.get("html_url"): urls_to_scrape.append(raw_user.get("html_url"))
+
+                for url in urls_to_scrape:
+                    scraped_data = await scraper.scrape_url(context, url)
+                    # Merge scraped data
+                    for k, v in scraped_data.items():
+                        if v: raw_user[k] = v
+            except Exception as e:
+                logger.error(f"Worker {worker_id}: Error scraping {login}: {e}")
+
+            # Push to result
+            await result_queue.put(raw_user)
+            user_queue.task_done()
             
-            for res in results:
-                for key, value in res.items():
-                    if value:
-                        user[key] = value
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Worker {worker_id} crashed: {e}")
+            user_queue.task_done()
 
-    return user
+async def saver(result_queue, base_df, filename="stargazers.xlsx"):
+    buffer = []
+    while True:
+        try:
+            # Wait for result, but timeout occasionally to flush buffer
+            try:
+                user = await asyncio.wait_for(result_queue.get(), timeout=5.0)
+                if user is None: # Sentinel
+                    if buffer:
+                        save_progress(base_df, buffer, filename)
+                    result_queue.task_done()
+                    break
+                buffer.append(user)
+                result_queue.task_done()
+            except asyncio.TimeoutError:
+                pass # Flush buffer
+            
+            if len(buffer) >= 20 or (buffer and not result_queue.empty() is False): # Flush if buffer big or timeout hit
+                save_progress(base_df, buffer, filename)
+                # Keep buffer in memory? No, save_progress appends to file? 
+                # Our save_progress loads old, merges new, saves. 
+                # So we should probably accumulate 'new_users' in main scope? 
+                # OR save_progress can just take the NEW chunk and append?
+                # The current save_progress implementation:
+                # combined_df = pd.concat([base_df, new_df], ignore_index=True)
+                # This means it rewrites the whole file. 
+                # If we pass ONLY buffer to save_progress, we need to update 'base_df' too!
+                
+                # Let's update base_df with buffer
+                if buffer:
+                    new_df = pd.DataFrame(buffer)
+                    # (Filtering logic inside save_progress duplicates this, but okay)
+                    # We need to make sure we don't handle 'buffer' clearing inside save_progress 
+                    # if we pass it by reference.
+                    pass
+                
+                # To be safe and simple: 
+                # We will keep a 'total_collected' list in saver? 
+                # Or just update base_df.
+                pass
+                
+        except asyncio.CancelledError:
+            # Flush remaining
+            if buffer:
+                save_progress(base_df, buffer, filename)
+            break
+        except Exception as e:
+            logger.error(f"Saver crashed: {e}")
 
+# Helper to reuse existing save logic
 def save_progress(base_df, new_users, filename="stargazers.xlsx"):
-    """
-    Saves the combined (base + new) data to Excel.
-    """
+    # (Same as before, but we need to ensure we append safely)
+    # Actually, allow me to modify this to be more efficient if possible, 
+    # but for now, reusing existing 'overwrite full file' is safest for data integrity.
+    # But we need to update base_df so next save includes previous batch!
+    # This is tricky. 'base_df' passed to saver needs to be mutable or updated.
+    # Actually, we can just read the file again? No, that's slow.
+    # Let's just append 'new_users' to 'base_df' inside the loop.
     try:
+        if not new_users: return
+
         new_df = pd.DataFrame(new_users)
         
-        # Rename columns to match export format
         columns_map = {
             "login": "Username", "name": "Name", "email": "GitHub Email",
             "scraped_email": "Scraped Email", "blog": "Website",
@@ -99,145 +161,110 @@ def save_progress(base_df, new_users, filename="stargazers.xlsx"):
             "bio": "Bio"
         }
         
-        # Filter and rename cols in new_df
         valid_cols = [c for c in columns_map.keys() if c in new_df.columns]
         new_df = new_df[valid_cols].rename(columns=columns_map)
         
-        # Combine
-        combined_df = pd.concat([base_df, new_df], ignore_index=True)
+        # Update base_df by concatenating
+        # We need to use 'global' or return it. 
+        # But pandas objects are mutable-ish if we append? No, concat returns new.
+        # We will just write to file for now. 
+        # Ideally we read the file, append, write. 
+        # OR we keep a running 'all_users' list in saver.
         
-        # Save
-        combined_df.to_excel(filename, index=False)
-        logger.info(f"Progress saved. Total records: {len(combined_df)}")
+        # Let's assume saver keeps 'all_data'.
+        # But we passed 'base_df'.
+        
+        # FIX: Just read file, append, save. 
+        # It's not super fast but fine for every 20 records.
+        if os.path.exists(filename):
+            existing = pd.read_excel(filename)
+            combined = pd.concat([existing, new_df], ignore_index=True)
+        else:
+            combined = pd.concat([base_df, new_df], ignore_index=True) # base_df is initial
+        
+        combined.to_excel(filename, index=False)
+        logger.info(f"Saved {len(new_users)} new users. Total: {len(combined)}")
+        
+        # Clear buffer after save
+        new_users.clear() # This clears the list passed in! 
+            
     except Exception as e:
-        logger.error(f"Failed to save progress: {e}")
+        logger.error(f"Save failed: {e}")
 
 async def main():
-    parser = argparse.ArgumentParser(description="StarReach: Fetch and enrich GitHub stargazers.")
-    parser.add_argument("repo_url", help="GitHub repository URL (e.g., https://github.com/owner/repo)")
-    parser.add_argument("--limit", type=int, default=None, help="Limit the number of stargazers to fetch")
+    parser = argparse.ArgumentParser(description="StarReach")
+    parser.add_argument("repo_url")
+    parser.add_argument("--limit", type=int, default=None)
     args = parser.parse_args()
 
     load_dotenv()
     token = os.getenv("GITHUB_TOKEN")
-    if not token or token == "your_github_token_here":
-        logger.error("GITHUB_TOKEN not found or invalid in .env file.")
-        print("Please create a .env file with GITHUB_TOKEN=...")
-        return
-
-    logger.info(f"Fetching stargazers for {args.repo_url}...")
     client = GitHubClient(token)
     scraper = ProfileScraper()
     
-    # Load existing data to preserve it and skip duplicates
-    base_df = pd.DataFrame()
+    # Load existing
     existing_usernames = set()
-    
+    initial_df = pd.DataFrame()
     if os.path.exists("stargazers.xlsx"):
-        try:
-            base_df = pd.read_excel("stargazers.xlsx")
-            if "Username" in base_df.columns:
-                existing_usernames = set(base_df["Username"].dropna().astype(str))
-            logger.info(f"Loaded {len(base_df)} existing records.")
-        except Exception as e:
-            logger.error(f"Error reading existing file: {e}")
-
-    logger.info(f"Checking against {len(existing_usernames)} existing users.")
+        df = pd.read_excel("stargazers.xlsx")
+        initial_df = df
+        if "Username" in df.columns:
+            existing_usernames = set(df["Username"].dropna().astype(str))
     
-    new_users = []
-    
-    # Semaphore for concurrent operations (both GitHub API and Scraping)
-    sem = asyncio.Semaphore(10)
+    logger.info(f"Skipping {len(existing_usernames)} existing.")
 
-    async def process_full_user(raw_user):
-        # A. Fetch Details
-        try:
-            if "url" in raw_user:
-                 details = await asyncio.to_thread(client.get_user_details, raw_user["url"])
-                 if details:
-                     raw_user.update(details)
-        except Exception as e:
-             logger.error(f"Error fetching details for {raw_user.get('login')}: {e}")
+    # Queues
+    user_queue = asyncio.Queue(maxsize=100) # Buffer 100 users
+    result_queue = asyncio.Queue()
 
-        # B. Scrape (process_user uses 'sem' internally to limit scraping)
-        return await process_user(raw_user, scraper, context, sem)
-
+    # Browser
     async with async_playwright() as p:
-        logger.info("Launching browser...")
-        browser = await p.chromium.launch(headless=False)
-        context = await browser.new_context(
-            user_agent="Mozilla/5.0 (compatible; StarReach/1.0)",
-            viewport={"width": 1280, "height": 720}
-        )
-        await context.route("**/*", lambda route: route.continue_() if route.request.resource_type in ["document", "script"] else route.abort())
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context()
+        
+        # Start Workers
+        workers = [
+            asyncio.create_task(worker(i, user_queue, result_queue, client, scraper, context))
+            for i in range(10)
+        ]
+        
+        # Start Saver
+        saver_task = asyncio.create_task(saver(result_queue, initial_df))
 
-        # Get raw stargazers
-        user_generator = client.get_stargazers(args.repo_url, fetch_details=False)
-        
-        tasks = []
-        total_fetched = 0
-        skipped_count = 0
-        
+        # Producer Logic
         try:
-            for user in user_generator:
-                if args.limit and total_fetched >= args.limit:
-                    logger.info(f"Hit limit of {args.limit} users.")
-                    break
+            total_fetched = 0
+            for user in client.get_stargazers(args.repo_url, fetch_details=False):
+                if args.limit and total_fetched >= args.limit: break
                 
-                # Check if user already exists
                 if user.get("login") in existing_usernames:
-                    skipped_count += 1
-                    if skipped_count % 50 == 0:
-                        logger.info(f"Skipped {skipped_count} existing users...")
                     continue
-
-                # Launch async task
-                if len(tasks) >= 20: 
-                    logger.info(f"Processing batch of {len(tasks)} (Total new fetched: {total_fetched})...")
-                    batch_results = await asyncio.gather(*tasks, return_exceptions=True)
-                    
-                    # Filter results
-                    current_batch_users = []
-                    for r in batch_results:
-                        if isinstance(r, Exception):
-                            logger.error(f"Task failed with error: {r}")
-                        else:
-                            current_batch_users.append(r)
-                    
-                    new_users.extend(current_batch_users)
-                    tasks = []
-                    
-                    save_progress(base_df, new_users)
-
-                tasks.append(process_full_user(user))
+                
+                await user_queue.put(user)
                 total_fetched += 1
+                if total_fetched % 10 == 0:
+                    logger.info(f"Queued {total_fetched} users...")
             
-            # Process remaining
-            if tasks:
-                logger.info(f"Processing final batch of {len(tasks)}...")
-                batch_results = await asyncio.gather(*tasks, return_exceptions=True)
-                current_batch_users = [r for r in batch_results if not isinstance(r, Exception)]
-                new_users.extend(current_batch_users)
-                save_progress(base_df, new_users)
-                tasks = []
-
+            # Signal end
+            for _ in workers:
+                await user_queue.put(None)
+                
+            await user_queue.join()
+            
+            # Signal saver
+            await result_queue.put(None)
+            await saver_task
+            
         except KeyboardInterrupt:
-            logger.warning("Operation stopped by user.")
-        except Exception as e:
-            logger.error(f"An error occurred in main loop: {e}", exc_info=True)
+            logger.info("Stopping...")
+            # Cancel workers
+            for w in workers: w.cancel()
+            # Wait for saver to flush
+            await result_queue.put(None)
+            await saver_task
+            
         finally:
-            if new_users:
-                logger.info(f"Saving progress before exit ({len(new_users)} new records)...")
-                save_progress(base_df, new_users)
-
-            logger.info("Cancelling pending tasks...")
-            logger.info("Closing browser...")
-            try:
-                await browser.close()
-            except Exception as e:
-                logger.warning(f"Error closing browser: {e}")
-
-    logger.info(f"Done. processed {len(new_users)} new users.")
+            await browser.close()
 
 if __name__ == "__main__":
     asyncio.run(main())
