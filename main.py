@@ -234,16 +234,46 @@ async def main():
         # Producer Logic
         try:
             total_fetched = 0
-            for user in client.get_stargazers(args.repo_url, fetch_details=False):
-                if args.limit and total_fetched >= args.limit: break
+            
+            # Helper for explicit non-blocking loop
+            owner, repo = client._parse_repo_url(args.repo_url)
+            current_url = f"{client.base_url}/repos/{owner}/{repo}/stargazers"
+            
+            while current_url:
+                if args.limit and total_fetched >= args.limit: 
+                    logger.info(f"Hit limit of {args.limit} users.")
+                    break
                 
-                if user.get("login") in existing_usernames:
-                    continue
+                # Fetch page in thread (network I/O)
+                try:
+                    # fetch_stargazers_page returns (users, next_url, retry_after)
+                    users, next_url, retry_after = await asyncio.to_thread(client.fetch_stargazers_page, current_url)
+                except Exception as e:
+                    logger.error(f"Error fetching page: {e}")
+                    break
                 
-                await user_queue.put(user)
-                total_fetched += 1
-                if total_fetched % 10 == 0:
-                    logger.info(f"Queued {total_fetched} users...")
+                # Handle Rate Limit (Async Sleep)
+                if retry_after > 0:
+                    logger.warning(f"Rate limit hit. Sleeping for {retry_after} seconds (async)...")
+                    await asyncio.sleep(retry_after)
+                    continue # Retry same URL (fetch_stargazers_page returns same url on limit)
+                
+                if not users and not next_url:
+                    break # Done or error
+                
+                # Enqueue users
+                for user in users:
+                    if args.limit and total_fetched >= args.limit: break
+                    
+                    if user.get("login") in existing_usernames:
+                        continue
+                    
+                    await user_queue.put(user)
+                    total_fetched += 1
+                    if total_fetched % 50 == 0:
+                        logger.info(f"Queued {total_fetched} users...")
+                
+                current_url = next_url
             
             # Signal end
             for _ in workers:

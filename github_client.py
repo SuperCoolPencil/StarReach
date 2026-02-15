@@ -26,10 +26,45 @@ class GitHubClient:
         self.session.mount("https://", adapter)
         self.session.mount("http://", adapter)
 
+    def fetch_stargazers_page(self, url: str) -> tuple[List[Dict], str | None, int]:
+        """
+        Fetches a single page of stargazers.
+        Returns: (list_of_users, next_page_url, retry_after_seconds)
+        - If success: (users, next_url, 0)
+        - If rate limit: ([], url, retry_time)
+        - If error: ([], None, 0)
+        """
+        try:
+            response = self.session.get(url, headers=self.headers, params={"per_page": 100}, timeout=10)
+            
+            if response.status_code == 200:
+                users = response.json()
+                next_url = None
+                if "next" in response.links:
+                    next_url = response.links["next"]["url"]
+                return users, next_url, 0
+            
+            if response.status_code in [403, 429]:
+                retry_after = int(response.headers.get("Retry-After", 60))
+                reset_time = int(response.headers.get("X-RateLimit-Reset", 0))
+                sleep_time = retry_after
+                if reset_time:
+                     current_time = time.time()
+                     sleep_time = max(sleep_time, int(reset_time - current_time + 1))
+                return [], url, sleep_time
+            
+            print(f"Error fetching stargazers: {response.status_code} - {response.text}")
+            return [], None, 0
+            
+        except requests.exceptions.RequestException as e:
+            print(f"Request failed: {e}")
+            return [], url, 5 # Retry same URL after 5s on network error
+
     def get_stargazers(self, repo_url: str, fetch_details: bool = True) -> Generator[Dict, None, None]:
         """
         Fetches stargazers for a given repository URL.
         Yields each stargazer's profile data.
+        NOTE: This is blocking! Use fetch_stargazers_page for async-friendly version.
         """
         owner, repo = self._parse_repo_url(repo_url)
         url = f"{self.base_url}/repos/{owner}/{repo}/stargazers"
@@ -37,40 +72,23 @@ class GitHubClient:
         while url:
             # Robust retry loop for the request itself
             while True:
-                try:
-                    response = self.session.get(url, headers=self.headers, params={"per_page": 100}, timeout=10)
-                    
-                    if response.status_code == 200:
-                        break # Success, process data
-                    
-                    if response.status_code in [403, 429]:
-                        # Check specific rate limit headers first
-                        retry_after = int(response.headers.get("Retry-After", 60))
-                        reset_time = int(response.headers.get("X-RateLimit-Reset", 0))
-                        
-                        sleep_time = retry_after
-                        if reset_time:
-                            sleep_time = max(sleep_time, reset_time - time.time() + 1)
-                        
-                        # Cap sleep at 60s for sanity logging, then loop? 
-                        # Or just commit to waiting. User wants NO data loss.
-                        # We'll log and wait.
-                        print(f"Rate limit hit. Sleeping for {sleep_time:.2f} seconds...")
-                        time.sleep(sleep_time)
-                        continue
-                    
-                    print(f"Error fetching stargazers: {response.status_code} - {response.text}")
-                    return # Stop generator on fatal error
-                    
-                except requests.exceptions.RequestException as e:
-                    print(f"Request failed: {e}. Retrying in 5s...")
-                    time.sleep(5)
-                    continue
-
-            users = response.json()
-            if not users:
-                break
+                users, next_url, retry_after = self.fetch_stargazers_page(url)
                 
+                if retry_after > 0:
+                    print(f"Rate limit hit. Sleeping for {retry_after} seconds...")
+                    time.sleep(retry_after)
+                    continue
+                
+                if not users and not next_url:
+                     # Error or done
+                     if not users: return # If users empty and no next_url, likely done or error
+                     # If we got users but no next_url, we process users and break outer
+                
+                if not users: # Error case passed as empty list
+                    return 
+
+                break # Got users
+
             for user in users:
                 if fetch_details:
                     # Get detailed user info to find public email/blog
@@ -80,11 +98,7 @@ class GitHubClient:
                 else:
                     yield user
             
-            # Pagination
-            if "next" in response.links:
-                url = response.links["next"]["url"]
-            else:
-                url = None
+            url = next_url
 
     def get_user_details(self, user_url: str) -> Dict:
         """
