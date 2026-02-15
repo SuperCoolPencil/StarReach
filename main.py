@@ -69,13 +69,11 @@ async def process_user(user, scraper, context, sem):
             results = await asyncio.gather(*[scrape_wrapper(u) for u in urls_to_scrape])
             
             for res in results:
-                # Merge results. valid non-None values overwrite previous ones.
-                # If we want to keep email from blog if github profile has none, or vice versa?
-                # Let's simple merge: if res has value, take it.
-                if res.get("scraped_email"):
-                    user["scraped_email"] = res["scraped_email"]
-                if res.get("scraped_linkedin"):
-                    user["scraped_linkedin"] = res["scraped_linkedin"]
+                # Merge logic: update if not present or just overwrite?
+                # Let's overwrite as scraped data is usually more specific than what we might have guessed
+                for key, value in res.items():
+                    if value:
+                        user[key] = value
 
     return user
 
@@ -91,8 +89,15 @@ def save_progress(base_df, new_users, filename="stargazers.xlsx"):
             "login": "Username", "name": "Name", "email": "GitHub Email",
             "scraped_email": "Scraped Email", "blog": "Website",
             "company": "Company", "location": "Location",
-            "twitter_username": "Twitter", "scraped_linkedin": "LinkedIn",
-            "html_url": "GitHub Profile"
+            "twitter_username": "Twitter (GitHub)",
+            "scraped_twitter": "Twitter (Scraped)",
+            "scraped_linkedin": "LinkedIn",
+            "scraped_facebook": "Facebook",
+            "scraped_instagram": "Instagram",
+            "scraped_youtube": "YouTube",
+            "scraped_bluesky": "Bluesky",
+            "html_url": "GitHub Profile",
+            "bio": "Bio"
         }
         
         # Filter and rename cols in new_df

@@ -22,9 +22,15 @@ def export_to_excel(data: List[Dict], filename: str = "stargazers.xlsx"):
         "blog": "Website",
         "company": "Company",
         "location": "Location",
-        "twitter_username": "Twitter",
+        "twitter_username": "Twitter (GitHub)",
+        "scraped_twitter": "Twitter (Scraped)",
         "scraped_linkedin": "LinkedIn",
-        "html_url": "GitHub Profile"
+        "scraped_facebook": "Facebook",
+        "scraped_instagram": "Instagram",
+        "scraped_youtube": "YouTube",
+        "scraped_bluesky": "Bluesky",
+        "html_url": "GitHub Profile",
+        "bio": "Bio"
     }
     
     # Filter for existing columns only
