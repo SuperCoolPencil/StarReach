@@ -66,20 +66,27 @@ class ProfileScraper:
         
         try:
             # Enforce a strict total timeout for the page operations
-            async with asyncio.timeout(30):
+            # Reduced to 20s to be more responsive
+            async with asyncio.timeout(20):
                 # timeout in ms for playwright
-                await page.goto(url, timeout=30000, wait_until="domcontentloaded")
+                # logging.debug(f"Navigating to {url}...")
+                await page.goto(url, timeout=15000, wait_until="domcontentloaded")
                 content = await page.content()
                 data = self.extract_from_text(content)
 
         except asyncio.TimeoutError:
-            # print(f"Timeout scraping {url}") 
+            # logging.warning(f"Timeout scraping {url}") 
             pass
         except Exception as e:
-            # Logging handled by caller usually, or we can just pass
+            # logging.error(f"Error scraping {url}: {e}")
             pass
         finally:
-            await page.close()
+            try:
+                # Protect against page.close() hanging
+                async with asyncio.timeout(2):
+                    await page.close()
+            except Exception:
+                pass
         
         return data
 

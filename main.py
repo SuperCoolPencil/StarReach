@@ -213,22 +213,23 @@ async def main():
         except Exception as e:
             logger.error(f"An error occurred in main loop: {e}", exc_info=True)
         finally:
-            if tasks:
-                logger.info("Completing pending tasks before exit...")
-                batch_results = await asyncio.gather(*tasks, return_exceptions=True)
-                for r in batch_results:
-                    if not isinstance(r, Exception):
-                        new_users.append(r)
-            
             if new_users:
-                logger.info("Saving final progress...")
+                logger.info(f"Saving progress before exit ({len(new_users)} new records)...")
                 save_progress(base_df, new_users)
+
+            logger.info("Cancelling pending tasks...")
+            # We don't await tasks here because they might be stuck. 
+            # We just let them die with the loop or try to cancel if we had task objects.
+            # Since we passed coroutines to gather, we can't easily cancel them individually 
+            # unless we wrapped them. But standard exit will cleanup.
 
             logger.info("Closing browser...")
             try:
                 await browser.close()
             except Exception as e:
                 logger.warning(f"Error closing browser: {e}")
+
+
 
     logger.info(f"Done. processed {len(new_users)} new users.")
 
