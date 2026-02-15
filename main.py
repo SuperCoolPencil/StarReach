@@ -214,8 +214,15 @@ async def main():
             logger.error(f"An error occurred in main loop: {e}", exc_info=True)
         finally:
             if tasks:
-                logger.info("Cleaning up pending tasks...")
-                await asyncio.gather(*tasks, return_exceptions=True)
+                logger.info("Completing pending tasks before exit...")
+                batch_results = await asyncio.gather(*tasks, return_exceptions=True)
+                for r in batch_results:
+                    if not isinstance(r, Exception):
+                        new_users.append(r)
+            
+            if new_users:
+                logger.info("Saving final progress...")
+                save_progress(base_df, new_users)
 
             logger.info("Closing browser...")
             try:
