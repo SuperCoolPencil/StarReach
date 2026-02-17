@@ -77,9 +77,13 @@ If you,  your team, or anyone you know is looking for someone, would love to con
                         if more_button.is_visible():
                             more_button.click()
                             # Wait for dropdown items
-                            connect_button_in_menu = page.get_by_role("button", name="Connect", exact=True)
-                            if connect_button_in_menu.is_visible():
-                                connect_button_in_menu.click()
+                            
+                            # The connect button inside the dropdown has dynamic aria-label "Invite <Name> to connect"
+                            # So get_by_role("button", name="Connect") might fail if exact match.
+                            # We use a locator looking for the specific text "Connect" inside a button role.
+                            connect_button_in_menu = page.locator("div[role='button']").filter(has_text="Connect")
+                            if connect_button_in_menu.first.is_visible():
+                                connect_button_in_menu.first.click()
                                 connect_button = connect_button_in_menu # Mark as found
                     else:
                         connect_button.click()
