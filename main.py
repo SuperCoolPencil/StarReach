@@ -111,7 +111,7 @@ async def saver(result_queue, base_df, filename="stargazers.xlsx"):
                 user = await asyncio.wait_for(result_queue.get(), timeout=5.0)
                 if user is None: # Sentinel
                     if buffer:
-                        save_progress(base_df, buffer, filename)
+                        await asyncio.to_thread(save_progress, base_df, buffer, filename)
                     result_queue.task_done()
                     break
                 buffer.append(user)
@@ -120,7 +120,7 @@ async def saver(result_queue, base_df, filename="stargazers.xlsx"):
                 pass # Flush buffer
             
             if len(buffer) >= 20 or (buffer and not result_queue.empty() is False): # Flush if buffer big or timeout hit
-                save_progress(base_df, buffer, filename)
+                await asyncio.to_thread(save_progress, base_df, buffer, filename)
                 # Keep buffer in memory? No, save_progress appends to file? 
                 # Our save_progress loads old, merges new, saves. 
                 # So we should probably accumulate 'new_users' in main scope? 
@@ -146,7 +146,7 @@ async def saver(result_queue, base_df, filename="stargazers.xlsx"):
         except asyncio.CancelledError:
             # Flush remaining
             if buffer:
-                save_progress(base_df, buffer, filename)
+                await asyncio.to_thread(save_progress, base_df, buffer, filename)
             break
         except Exception as e:
             logger.error(f"Saver crashed: {e}")
