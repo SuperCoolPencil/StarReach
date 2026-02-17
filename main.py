@@ -66,14 +66,33 @@ async def worker(worker_id, user_queue, result_queue, client, scraper, context):
                 if raw_user.get("html_url"): urls_to_scrape.append(raw_user.get("html_url"))
 
                 for url in urls_to_scrape:
-                    scraped_data = await scraper.scrape_url(context, url)
-                    # Merge scraped data
-                    for k, v in scraped_data.items():
-                        if v: raw_user[k] = v
-            except Exception as e:
-                logger.error(f"Worker {worker_id}: Error scraping {login}: {e}")
+                    try:
+                        scraped_data = await scraper.scrape_url(context, url)
+                        # Merge scraped data
+                        for k, v in scraped_data.items():
+                            if v: raw_user[k] = v
+                    except Exception as scrape_err:
+                        # Log partial failure but don't crash whole worker for one URL
+                        # UNLESS it's the only URL and we want to retry?
+                        # Actually per user request: "NEVER missed linkedin, if it fails it must be requeued"
+                        # If a scrape fails, we might miss LinkedIn. So we should retry the USER.
+                        logger.warning(f"Failed to scrape {url} for {login}: {scrape_err}")
+                        raise scrape_err # Re-raise to trigger user retry logic
 
-            # Push to result
+            except Exception as e:
+                # Retry Logic
+                retries = raw_user.get("_retries", 0)
+                if retries < 3:
+                    raw_user["_retries"] = retries + 1
+                    logger.warning(f"Worker {worker_id}: Error processing {login} (Attempt {retries+1}/3). Requeuing. Error: {e}")
+                    # Requeue
+                    await user_queue.put(raw_user)
+                    user_queue.task_done()
+                    continue
+                else:
+                    logger.error(f"Worker {worker_id}: Max retries reached for {login}. Skipping. Last Error: {e}")
+
+            # Push to result (only if successful or max retries reached)
             await result_queue.put(raw_user)
             user_queue.task_done()
             

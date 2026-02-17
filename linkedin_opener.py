@@ -90,19 +90,25 @@ If you,  your team, or anyone you know is looking for someone, would love to con
                     
                     # If we managed to click a Connect button, look for "Add a note"
                     if connect_button and connect_button.is_visible():
-                        add_note_button = page.get_by_role("button", name="Add a note")
+                        # Using get_by_label as the buttons have aria-labels
+                        add_note_button = page.get_by_label("Add a note")
                         if add_note_button.is_visible(timeout=5000):
                             add_note_button.click()
                             
                             # Type the message
-                            # Label usually is "Add a note" or we look for textarea
-                            text_area = page.locator("textarea[name='message']")
+                            # Using id="custom-message" or name="message"
+                            text_area = page.locator("#custom-message")
+                            if not text_area.is_visible():
+                                text_area = page.locator("textarea[name='message']")
+
                             if text_area.is_visible(timeout=5000):
                                 text_area.fill(message)
                                 print("Filled note. Waiting for you to review and send (or close)...")
                             else:
                                 print("Could not find text area to fill note.")
                         else:
+                            # It's possible the 'Add a note' modal didn't appear, or we are already connected?
+                            # Or maybe it went straight to "Send" (if no customization allowed?)
                             print("Could not find 'Add a note' button in modal.")
                     else:
                         print("Could not find 'Connect' button automatically.")

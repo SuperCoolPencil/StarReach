@@ -62,31 +62,32 @@ class ProfileScraper:
             url = "http://" + url
 
         data = {"scraped_email": None, "scraped_linkedin": None}
-        page = await context.new_page()
+        page = None
         
         try:
-            # Enforce a strict total timeout for the page operations
-            # Reduced to 20s to be more responsive
-            async with asyncio.timeout(20):
-                # timeout in ms for playwright
+            # Enforce a strict total timeout for the entire operation including new_page
+            async with asyncio.timeout(30):
+                page = await context.new_page()
+                
                 # logging.debug(f"Navigating to {url}...")
                 await page.goto(url, timeout=15000, wait_until="domcontentloaded")
                 content = await page.content()
                 data = self.extract_from_text(content)
 
         except asyncio.TimeoutError:
-            # logging.warning(f"Timeout scraping {url}") 
-            pass
+            # Re-raise timeout error so worker can handle it
+            raise
         except Exception as e:
-            # logging.error(f"Error scraping {url}: {e}")
-            pass
+            # Re-raise other errors
+            raise
         finally:
-            try:
-                # Protect against page.close() hanging
-                async with asyncio.timeout(2):
-                    await page.close()
-            except Exception:
-                pass
+            if page:
+                try:
+                    # Protect against page.close() hanging
+                    async with asyncio.timeout(2):
+                        await page.close()
+                except Exception:
+                    pass
         
         return data
 
