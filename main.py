@@ -198,26 +198,25 @@ def main():
     print(f"\nProcessing {total} new profiles (skipped {len(processed_usernames)}).")
     print("Press Ctrl+C to stop and save progress.\n")
     
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=5)
     try:
-        # Use ThreadPoolExecutor for parallel processing
-        # max_workers=5 to be conservative with API limits
-        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-            future_to_user = {executor.submit(process_user, user): user for user in users_to_process}
-            
-            completed_count = 0
-            for future in concurrent.futures.as_completed(future_to_user):
-                user = future_to_user[future]
-                try:
-                    result = future.result()
-                    if result:
-                        final_data.append(result)
-                    
-                    completed_count += 1
-                    if completed_count % 10 == 0:
-                        print(f"Progress: {completed_count}/{total}")
+        # Submit all tasks
+        future_to_user = {executor.submit(process_user, user): user for user in users_to_process}
+        
+        completed_count = 0
+        for future in concurrent.futures.as_completed(future_to_user):
+            user = future_to_user[future]
+            try:
+                result = future.result()
+                if result:
+                    final_data.append(result)
+                
+                completed_count += 1
+                if completed_count % 10 == 0:
+                    print(f"Progress: {completed_count}/{total}")
 
-                except Exception as exc:
-                    print(f'{user} generated an exception: {exc}')
+            except Exception as exc:
+                print(f'{user} generated an exception: {exc}')
 
     except KeyboardInterrupt:
         print("\n\nStopping script (KeyboardInterrupt)...")
@@ -227,6 +226,9 @@ def main():
     except Exception as e:
         print(f"\n\nAn unexpected error occurred: {e}")
     finally:
+        # Ensure executor is closed
+        executor.shutdown(wait=True)
+
         # Export
         print("\nSaving to Excel...")
         if final_data:
