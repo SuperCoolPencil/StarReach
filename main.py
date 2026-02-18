@@ -2,6 +2,7 @@ import requests
 import pandas as pd
 import time
 import os
+import concurrent.futures
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 
@@ -125,46 +126,104 @@ def main():
     print(f"\nProcessing {total} new profiles (skipped {len(processed_usernames)}). This might take a minute depending on their blog speeds.\n")
     print("Press Ctrl+C to stop and save progress.\n")
     
+def process_user(username):
+    """Process a single user and return their info if successful."""
     try:
-        for i, username in enumerate(users_to_process):
-            print(f"[{i+1}/{total}] Checking {username}...")
+        print(f"Checking {username}...")
+        profile = get_user_profile(username)
+        
+        if profile:
+            blog_url = profile.get('blog')
+            linkedin_url = None
             
-            profile = get_user_profile(username)
-            
-            if profile:
-                blog_url = profile.get('blog')
-                linkedin_url = None
-                
-                # Check social accounts for LinkedIn
-                socials = get_social_accounts(username)
-                for social in socials:
-                    if 'linkedin.com/in/' in social['url']:
-                        linkedin_url = social['url']
-                        print(f"   --> Found LinkedIn in social accounts: {linkedin_url}")
-                        break
+            # Check social accounts for LinkedIn
+            socials = get_social_accounts(username)
+            for social in socials:
+                if 'linkedin.com/in/' in social['url']:
+                    linkedin_url = social['url']
+                    print(f"   --> Found LinkedIn for {username}: {linkedin_url}")
+                    break
 
-                # If not found in socials, and they have a blog, crawl it
-                if not linkedin_url and blog_url:
-                    linkedin_url = find_linkedin_on_website(blog_url)
-                
-                user_info = {
-                    'Username': username,
-                    'Name': profile.get('name'),
-                    'Company': profile.get('company'),
-                    'Location': profile.get('location'),
-                    'Email': profile.get('email'), # Only if public
-                    'Twitter': profile.get('twitter_username'),
-                    'Website': blog_url,
-                    'Found_LinkedIn': linkedin_url,
-                    'GitHub_URL': profile.get('html_url')
-                }
-                final_data.append(user_info)
+            # If not found in socials, and they have a blog, crawl it
+            if not linkedin_url and blog_url:
+                linkedin_url = find_linkedin_on_website(blog_url)
+                if linkedin_url:
+                     print(f"   --> Found LinkedIn for {username} on blog: {linkedin_url}")
             
-            # Respectful pause to avoid hitting GitHub API limits too hard
+            # Respectful pause (per thread)
             time.sleep(0.2)
+
+            return {
+                'Username': username,
+                'Name': profile.get('name'),
+                'Company': profile.get('company'),
+                'Location': profile.get('location'),
+                'Email': profile.get('email'), # Only if public
+                'Twitter': profile.get('twitter_username'),
+                'Website': blog_url,
+                'Found_LinkedIn': linkedin_url,
+                'GitHub_URL': profile.get('html_url')
+            }
+    except Exception as e:
+        print(f"Error processing {username}: {e}")
+    return None
+
+def main():
+    print(f"Starting crawl for {REPO}...")
+    stargazers = get_stargazers(REPO)
+    
+    final_data = []
+    processed_usernames = set()
+    
+    # Load existing data if available to resume
+    if os.path.exists('surge_leads.xlsx'):
+        print("Found existing 'surge_leads.xlsx', loading to resume...")
+        try:
+            existing_df = pd.read_excel('surge_leads.xlsx')
+            if 'Username' in existing_df.columns:
+                processed_usernames = set(existing_df['Username'].tolist())
+                final_data = existing_df.to_dict('records')
+                print(f"Loaded {len(final_data)} existing records.")
+        except Exception as e:
+            print(f"Could not load existing file: {e}")
+
+    # Filter out already processed users
+    users_to_process = [u for u in stargazers if u not in processed_usernames]
+    total = len(users_to_process)
+    
+    if total == 0:
+        print("All users already processed!")
+        return
+
+    print(f"\nProcessing {total} new profiles (skipped {len(processed_usernames)}).")
+    print("Press Ctrl+C to stop and save progress.\n")
+    
+    try:
+        # Use ThreadPoolExecutor for parallel processing
+        # max_workers=5 to be conservative with API limits
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            future_to_user = {executor.submit(process_user, user): user for user in users_to_process}
             
+            completed_count = 0
+            for future in concurrent.futures.as_completed(future_to_user):
+                user = future_to_user[future]
+                try:
+                    result = future.result()
+                    if result:
+                        final_data.append(result)
+                    
+                    completed_count += 1
+                    if completed_count % 10 == 0:
+                        print(f"Progress: {completed_count}/{total}")
+
+                except Exception as exc:
+                    print(f'{user} generated an exception: {exc}')
+
     except KeyboardInterrupt:
         print("\n\nStopping script (KeyboardInterrupt)...")
+        print("Cancelling pending tasks...")
+        executor.shutdown(wait=False, cancel_futures=True)
+        print("Waiting for currently running tasks to finish (max 5)...")
     except Exception as e:
         print(f"\n\nAn unexpected error occurred: {e}")
     finally:
