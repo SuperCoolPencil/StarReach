@@ -1,6 +1,7 @@
 import pandas as pd
 from playwright.sync_api import sync_playwright
 import os
+import argparse
 
 # The message you wanted to send (printed for easy copying)
 MESSAGE = """Hey, thanks for the star on Surge!
@@ -10,6 +11,10 @@ I'm the creator (2nd year at IIITG). I'm currently looking for a summer internsh
 If you, your team, or anyone you know is looking for an intern, I'd love to connect!"""
 
 def main():
+    parser = argparse.ArgumentParser(description="LinkedIn Viewer")
+    parser.add_argument("--offset", type=int, default=0, help="Start from this index (0-based)")
+    args = parser.parse_args()
+
     excel_file = 'surge_leads.xlsx'
     
     if not os.path.exists(excel_file):
@@ -27,6 +32,17 @@ def main():
     leads = df[df['Found_LinkedIn'].notna()]
     urls = leads['Found_LinkedIn'].tolist()
     names = leads['Name'].tolist()
+    
+    total_leads = len(urls)
+    offset = args.offset
+
+    if offset > 0:
+        if offset >= total_leads:
+            print(f"Error: Offset {offset} is out of bounds (Total: {total_leads})")
+            return
+        print(f"Skipping first {offset} profiles. Starting from {offset + 1}.")
+        urls = urls[offset:]
+        names = names[offset:]
 
     if not urls:
         print("No LinkedIn URLs found in the Excel file.")
@@ -51,8 +67,9 @@ def main():
         
         for i, url in enumerate(urls):
             name = names[i] if pd.notna(names[i]) else "there"
+            current_idx = i + offset + 1
             
-            print(f"\n[{i+1}/{len(urls)}] Opening profile for: {name}")
+            print(f"\n[{current_idx}/{total_leads}] Opening profile for: {name}")
             print(f"URL: {url}")
             
             try:
