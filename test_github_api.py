@@ -1,9 +1,15 @@
 import requests
 import json
+import os
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 # Use the token from main.py if available, otherwise just try unauthenticated (might get rate limited)
-GITHUB_TOKEN = '***REMOVED***'
-HEADERS = {'Authorization': f'token {GITHUB_TOKEN}'}
+GITHUB_TOKEN = os.environ.get('GITHUB_TOKEN')
+HEADERS = {'Authorization': f'token {GITHUB_TOKEN}'} if GITHUB_TOKEN else {}
 
 def check_user(username):
     url = f'https://api.github.com/users/{username}'

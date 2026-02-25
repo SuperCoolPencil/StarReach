@@ -5,11 +5,16 @@ import os
 import concurrent.futures
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 # --- CONFIGURATION ---
-GITHUB_TOKEN = '***REMOVED***'  # Replace with your actual token
+GITHUB_TOKEN = os.environ.get('GITHUB_TOKEN')
 REPO = 'surge-downloader/surge'
-HEADERS = {'Authorization': f'token {GITHUB_TOKEN}'}
+HEADERS = {'Authorization': f'token {GITHUB_TOKEN}'} if GITHUB_TOKEN else {}
 TIMEOUT = 5  # Seconds to wait for a blog to load
 
 def get_stargazers(repo):
