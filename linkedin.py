@@ -10,9 +10,44 @@ I'm the creator (2nd year at IIITG). I'm currently looking for a summer internsh
 
 If you, your team, or anyone you know is looking for an intern, I'd love to connect!"""
 
+
+def detect_connection_status(page, timeout_ms=5000):
+    """
+    Detect the LinkedIn connection status for the currently loaded profile.
+
+    Returns one of:
+        'connect'  — not connected, show the message prompt
+        'pending'  — connection request already sent
+        'connected' — already connected (Message button visible)
+        'unknown'  — could not determine
+    """
+    try:
+        # Wait for the profile actions section to load
+        page.wait_for_selector('div.pvs-profile-actions', timeout=timeout_ms)
+    except Exception:
+        # Fallback: the page structure may differ (e.g. company pages)
+        return 'unknown'
+
+    actions = page.query_selector('div.pvs-profile-actions')
+    if not actions:
+        return 'unknown'
+
+    buttons_text = actions.inner_text().lower()
+
+    if 'pending' in buttons_text:
+        return 'pending'
+    if 'message' in buttons_text and 'connect' not in buttons_text:
+        return 'connected'
+    if 'connect' in buttons_text:
+        return 'connect'
+
+    return 'unknown'
+
+
 def main():
     parser = argparse.ArgumentParser(description="LinkedIn Viewer")
     parser.add_argument("--offset", type=int, default=0, help="Start from this index (0-based)")
+    parser.add_argument("--no-skip", action="store_true", help="Don't auto-skip any profiles")
     args = parser.parse_args()
 
     excel_file = 'surge_leads.xlsx'
@@ -49,6 +84,12 @@ def main():
         return
 
     print(f"Found {len(urls)} profiles to process.")
+    if not args.no_skip:
+        print("Auto-skipping profiles with pending/accepted connections.")
+        print("Use --no-skip to disable this.\n")
+
+    skipped = 0
+    processed = 0
 
     with sync_playwright() as p:
         # Launch browser (headless=False means you can see it)
@@ -73,11 +114,31 @@ def main():
             print(f"URL: {url}")
             
             try:
-                page.goto(url)
+                page.goto(url, wait_until='domcontentloaded')
+                # Small wait for dynamic content to render
+                page.wait_for_timeout(1500)
             except Exception as e:
                 print(f"Could not load page: {e}")
                 continue
 
+            # Detect connection status and auto-skip if appropriate
+            if not args.no_skip:
+                status = detect_connection_status(page)
+
+                if status == 'pending':
+                    skipped += 1
+                    print(f"   ⏭  SKIPPED — connection request already pending")
+                    continue
+                elif status == 'connected':
+                    skipped += 1
+                    print(f"   ⏭  SKIPPED — already connected")
+                    continue
+                elif status == 'connect':
+                    print(f"   ✅ Not connected yet — ready for outreach")
+                elif status == 'unknown':
+                    print(f"   ⚠️  Could not detect status — showing anyway")
+
+            processed += 1
             print("-" * 50)
             print("MESSAGE TO COPY:")
             print(MESSAGE)
@@ -87,8 +148,9 @@ def main():
             if user_input.lower() == 'q':
                 break
 
-        print("Finished processing list. Closing browser.")
+        print(f"\nFinished! Processed: {processed}, Skipped: {skipped}. Closing browser.")
         browser.close()
+
 
 if __name__ == "__main__":
     main()
