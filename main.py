@@ -310,8 +310,8 @@ def main():
         # Ensure executor is closed
         executor.shutdown(wait=True)
 
-        # Export
-        print("\nSaving to Excel...")
+        # Export — always try to save, fall back to CSV if Excel fails
+        print("\nSaving progress...")
         if final_data:
             df = pd.DataFrame(final_data)
 
@@ -329,8 +329,13 @@ def main():
             # Add remaining columns not in our preferred order
             df = df[cols + [c for c in df.columns if c not in cols]]
 
-            df.to_excel('surge_leads.xlsx', index=False)
-            print(f"Done! Saved {len(df)} records to 'surge_leads.xlsx'.")
+            try:
+                df.to_excel('surge_leads.xlsx', index=False)
+                print(f"Done! Saved {len(df)} records to 'surge_leads.xlsx'.")
+            except Exception as save_err:
+                print(f"Excel save failed ({save_err}), falling back to CSV...")
+                df.to_csv('surge_leads.csv', index=False)
+                print(f"Saved {len(df)} records to 'surge_leads.csv'.")
         else:
             print("No data to save.")
 
