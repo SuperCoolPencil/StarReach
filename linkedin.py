@@ -40,6 +40,8 @@ def detect_connection_status(page, timeout_ms=5000):
         return 'connected'
     if 'connect' in buttons_text:
         return 'connect'
+    if 'follow' in buttons_text:
+        return 'follow'
 
     return 'unknown'
 
@@ -135,6 +137,8 @@ def main():
                     continue
                 elif status == 'connect':
                     print(f"   ✅ Not connected yet — ready for outreach")
+                elif status == 'follow':
+                    print(f"   ✅ Follow profile — use More > Connect to send request")
                 elif status == 'unknown':
                     print(f"   ⚠️  Could not detect status — showing anyway")
 
