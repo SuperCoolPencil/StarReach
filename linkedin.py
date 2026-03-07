@@ -28,19 +28,23 @@ def detect_connection_status(page, timeout_ms=5000):
         # Fallback: the page structure may differ (e.g. company pages)
         return 'unknown'
 
-    actions = page.query_selector('div.pvs-profile-actions')
-    if not actions:
+    # Read the actual button labels from LinkedIn's artdeco button spans
+    button_labels = set()
+    for btn in page.query_selector_all('div.pvs-profile-actions span.artdeco-button__text'):
+        text = btn.inner_text().strip().lower()
+        if text:
+            button_labels.add(text)
+
+    if not button_labels:
         return 'unknown'
 
-    buttons_text = actions.inner_text().lower()
-
-    if 'pending' in buttons_text:
+    if 'pending' in button_labels:
         return 'pending'
-    if 'message' in buttons_text and 'connect' not in buttons_text:
+    if 'message' in button_labels and 'connect' not in button_labels:
         return 'connected'
-    if 'connect' in buttons_text:
+    if 'connect' in button_labels:
         return 'connect'
-    if 'follow' in buttons_text:
+    if 'follow' in button_labels:
         return 'follow'
 
     return 'unknown'
